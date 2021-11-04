@@ -1,0 +1,171 @@
+---
+title: 'Noto Data Task'
+author: ""
+date: ""
+output: pdf_document
+header-includes:
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancypagestyle{plain}{\pagestyle{fancy}}
+  - \usepackage{xcolor}
+  - \newcommand{\magenta}[1]{\textcolor{magenta}{#1}}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.width = 12, fig.height = 8, warning = F, message = F)
+rm(list = ls())
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+pacman::p_load(tidyverse, #data cleaning
+               janitor, # for clean_names
+               reshape2, # for melt 
+               msm,  # for delta method
+               stargazer) # for table presenting
+mydata <- clean_names(read_csv("Noto_data_task.csv")) %>% mutate(t = year - 1962)
+
+######## Note that the reproducing activity was possible because of the STATA do file that is available here: http://economics.mit.edu/faculty/dautor/data/autkatkear08  #######
+```
+
+
+```{r}
+# Figure 4A 
+fit_wage <- lm(clphsg_all ~ t, data = mydata)
+wage_diff <- fit_wage$residuals
+fit_supply <- lm(eu_lnclg ~ t, data = mydata)
+supply <- fit_supply$residuals
+figure_4_tibble <- tibble(detrended_wage_diff = wage_diff, detrended_relative_supply = supply, year = 1963:2008)
+figure_4 <- melt(figure_4_tibble, id="year")
+
+ggplot(data = figure_4)+
+  geom_line(aes(x = year, y = value, color = variable)) +
+  geom_point(aes(x = year, y = value, color = variable)) +
+  theme_light() +
+  scale_x_continuous(breaks = round(seq(min(figure_4$year), max(figure_4$year), by = 6),1)) +
+  scale_y_continuous(breaks = round(seq(-0.15, 0.15, by = 0.05), 3)) +
+  labs(title = ("Detrended College/High School Wage Differential and Relative Supply"),
+       subtitle = ("1963-2005"))+
+  ylab("Log Points") +
+  xlab("Year") +
+  geom_vline(xintercept= 2005, linetype = "dashed", color = 'grey') + 
+  geom_hline(yintercept = 0, color = "black") + 
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+# Figure 4B
+fit_KM <- lm(clphsg_all~ t +  eu_lnclg,data = mydata[1:(which(mydata$year == 1988)-1),])
+figure_4B_tibble <- tibble(KM_Predicted_Wage_Gap = predict.lm(fit_KM, mydata), year = 1963:2008, Observed_CLG_HS_Gap = mydata$clphsg_all)
+figure_4B <- melt(figure_4B_tibble, id="year")
+
+ggplot(data = figure_4B)+
+  geom_line(aes(x = year, y = value, color = variable)) +
+  geom_point(aes(x = year, y = value, color = variable)) +
+  theme_light() +
+  scale_x_continuous(breaks = round(seq(min(figure_4$year), max(figure_4$year), by = 6),1)) +
+  scale_y_continuous(breaks = round(seq(0.35, 0.75, by = 0.1), 3)) +
+  labs(title = ("KM Prediction Model for the College/High School Wage Gap"))+
+  ylab("Log Wage Gap") +
+  xlab("Year") +
+  geom_vline(xintercept= 1987, color = 'black') +
+  geom_vline(xintercept= 1992, color = 'black') + 
+  geom_vline(xintercept= 2005, linetype = "dashed", color = 'grey') + 
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+
+```{r}
+# this function is used to remove the top two lines of the stargazer output. 
+mod_stargazer <- function(...){
+  output <- capture.output(stargazer(...))
+  output <- output[4:length(output)]
+  cat(paste(output, collapse = "\n"), "\n")
+}
+
+# this function is used to make the size of the table appropriate in RMD pdf, we don't need it if using Latex.
+resizebox.stargazer = function(..., tab.width = "!", tab.height = "!"
+){
+  require(stringr) 
+  res = capture.output(
+    mod_stargazer(...)
+  )
+  tab.width = tab.width
+  tab.height = tab.height
+  res = 
+    prepend(res, "}", before = length(res))
+  res = 
+    c(res[1:str_which(res, "^\\\\begin\\{tabular\\}.*")-1],
+      paste0("\\resizebox{",tab.width,"}{",tab.height,"}{%"),
+      res[str_which(res, "^\\\\begin\\{tabular\\}.*"):length(res)]
+    )
+  cat(res, sep = "\n")
+}
+
+
+```
+
+
+```{r, results = "asis"}
+mydata <- mydata %>% mutate(t_square = t^2/100, t_cub = t^3/1000, t_post92 = ifelse(year - 1992 > 0, year - 1992, 0)) 
+linear_1 <- lm(clphsg_all ~ eu_lnclg + t, data =mydata[1:(which(mydata$year == 1988)-1),])
+linear_2 <- lm(clphsg_all ~ eu_lnclg + t, data =mydata)
+linear_3 <- lm(clphsg_all ~ eu_lnclg + t + t_post92, data =mydata)
+linear_4 <- lm(clphsg_all ~ eu_lnclg + t + t_square, data =mydata)
+linear_5 <- lm(clphsg_all ~ eu_lnclg + t + t_square + t_cub, data =mydata)
+
+list_model <- list(linear_1, linear_2, linear_3, linear_4, linear_5)
+reciprocal <- unlist(lapply(list_model, function(x) 1/(coef(x)[2])))
+se <- unlist(lapply(list_model, function(x)  deltamethod(~ 1/(x1), coef(x)[2], vcov(x)[2,2])))
+
+resizebox.stargazer(linear_1, linear_2, linear_3, linear_4, linear_5, 
+          title="REGRESSION MODELS FOR THE COLLEGE/HIGH SCHOOL LOG WAGE GAP, 1963–2005", 
+          type = 'latex',
+          covariate.labels = c("CLG/HS relative supply", "Time", "Time-square","Time-cub", "Time-post-1992"),
+          order = c(1, 2, 4, 5, 3),
+          column.labels = c("1963-1987","", "1963-2005"),
+          add.lines = list(c("Elasticity of Substitution", paste0(round(as.numeric(reciprocal),3), "***", "(",round(as.numeric(se),3),")"))),
+          dep.var.labels.include = FALSE,
+          dep.var.caption = "",
+          column.separate = c(1, 3, 1),
+          column.sep.width = "1pt",
+          tab.width = "1.1\\textwidth",
+          tab.height = "1.1\\textheight")
+```
+
+
+
+```{r}
+r <- c()
+for(i in 1964:2007){
+  mydata <- mydata %>% mutate(t_loop = ifelse(year - i >0, year - i ,0))
+  linear <- lm(clphsg_all ~ eu_lnclg + t + t_loop, data =mydata)
+  r <- c(summary(linear)$r.squared, r)
+  if (i == 2007){
+    answer <- which.max(r) + 1963
+  }
+}
+last_figure_tibble <- tibble(Year = 1964:2007, R_squared = r)
+ggplot(data = last_figure_tibble)+
+  geom_line(aes(Year, R_squared))+ 
+  theme_light() +
+  labs(title = ("The Trend Break Year that Maximizes the R2 of the Regression Model"))+
+  ylab("R Squared") +
+  xlab("Year") +
+  geom_vline(xintercept= answer, color = 'red') +
+  geom_text(aes(x=answer + 2, label= round(r[which.max(r)],3), y= max(r)), colour="red", size = 3) +
+  geom_text(aes(x=answer, label= answer, y= 0.94), colour="red",size = 4)
+  
+```
+
+
+
+
+

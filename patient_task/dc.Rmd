@@ -1,0 +1,372 @@
+---
+title: 'Task'
+author: ""
+date: ""
+output: pdf_document
+header-includes:
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancypagestyle{plain}{\pagestyle{fancy}}
+  - \usepackage{xcolor}
+  - \newcommand{\magenta}[1]{\textcolor{magenta}{#1}}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+## R Markdown
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.width = 8, fig.height = 6, warning = F, message = F)
+#R language.
+
+rm(list = ls())
+pacman::p_load(tidyverse, #data cleaning
+               janitor, # for clean_names
+               reshape2, # for melt 
+               msm,# for delta method
+               readxl,# read_excel
+               stargazer, # regression table making 
+               scales, # percent 
+               kableExtra, # table making 
+               data.table,# sometimes useful
+               lubridate, # ymd
+               MASS, # rlm
+               Hmisc, # graphing
+               usmap, # US map
+               chron, # for time
+               zoo) # rollapply
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+
+
+```{r load data}
+shift <- read_csv("test_data.csv") %>% 
+  mutate(shift_date = as.Date(shift_date, "%d%b%Y")) %>% # take care of the date. 
+  separate(arrive, c("arrive_date", "arrive_time"), sep = " ")  %>%
+  mutate(arrive_date = as.Date(arrive_date, "%d%b%Y")) %>%
+  separate(leave, c("leave_date", "leave_time"), sep = " ")  %>%
+  mutate(leave_date = as.Date(leave_date, "%d%b%Y")) %>% 
+  filter(pred_lnlos > 0) %>% # remove negative values.
+  mutate(arrive_time = times(arrive_time),
+         leave_time = times(leave_time)) %>% # format the time
+  mutate(shift_start = gsub("\\.", "", shift_start),
+         shift_end = gsub("\\.", "", shift_end)) %>% # remove period
+  mutate(shift_start = ifelse(shift_start == "noon", "12 pm", shift_start),
+         shift_end = ifelse(shift_end == "noon", "12 pm", shift_end))  %>% #remove noon
+  mutate(shift_start = times(format(strptime(shift_start, "%I %p"), "%H:%M:%S")),
+         shift_end = times(format(strptime(shift_end, "%I %p"), "%H:%M:%S")))  %>% #  convert to standard time.
+  mutate(shift_nextday = ifelse(shift_end < shift_start, 1, 0)) %>% # an indicator shows if the shift cross the date
+    filter(!(arrive_date == leave_date & leave_time <= arrive_time)) # filter out those weird entries.
+```
+
+
+## Part 0 
+
+Some weird entries were filtered out. (pred_lnlos $\leq$ 0, leave before arrive, leave = arrive)
+
+```{r}
+shift_1 <- shift %>% 
+  mutate(arrive_early = ifelse(arrive_date == shift_date & arrive_time < shift_start, 1, 0)) %>%# same day arrive
+  mutate(leave_late = ifelse((shift_nextday == 0 & leave_date == shift_date & leave_time > shift_end)| # same day leave
+                               (shift_nextday == 1 & leave_date > shift_date & leave_time > shift_end), 1, 0)) # next day leave
+mean(shift_1$arrive_early)
+mean(shift_1$leave_late)
+```
+
+## Part 1
+
+Approximately, 7.43\% of the patients arrived before their physician's shift starts and 13.61\% discharged after their physician's shift ends.
+
+## Part 2
+```{r}
+shift_2 <- shift_1 %>%
+  mutate(arrive_hours = hours(arrive_time)) # add hours of arrival
+ggplot(data = shift_2, aes(x = arrive_hours)) +
+  geom_histogram(aes(y = ..density..), binwidth = 1, color="black", fill="white") + 
+  geom_density(alpha=0.2, fill="red") +
+  scale_x_continuous(breaks = round(seq(0, 23, by = 1),1)) + # set x breaks
+  theme_light() +
+  labs(title = ("Hourly patterns of patient arrivals")) +
+  xlab("Hours") +
+  ylab("Density")
+```
+
+```{r}
+ggplot(data = shift_2 %>% 
+  group_by(arrive_hours) %>% # get the average by hours
+  summarise(average_severity = mean(pred_lnlos, na.rm = T)),
+  aes(x = arrive_hours, y = average_severity)) +
+  geom_line(color = "red") + 
+  scale_x_continuous(breaks = round(seq(0, 23, by = 1),1)) + # set x breaks
+  theme_light() +
+  labs(title = ("Hourly patterns of average severity")) +
+  xlab("Hours") +
+  ylab("Average Severity")
+```
+
+From the hourly patterns of patient arrivals, We can see that patients come in most at 6 am and least at 1 am. There is a peak between 6am and 2pm, after which the number of patients keeps dropping until it starts to rise after 1am.
+
+The hourly patterns of average severity shows that there are several peaks in patient severity throughout the day: 1 am, 7 am to 10 am, 12 noon, 6 pm and 9 pm. 
+
+We want to see whether patient severity is or is not predicted by hour of the day, let's add a regression line to the plot and the report of regression is shown below.
+
+
+```{r}
+ggplot(data = shift_2 %>% 
+  group_by(arrive_hours) %>% # get the average by hours
+  summarise(average_severity = mean(pred_lnlos, na.rm = T)),
+  aes(x = arrive_hours, y = average_severity)) +
+  geom_line(color = "red") + 
+  scale_x_continuous(breaks = round(seq(0, 23, by = 1),1)) + # set x breaks
+  theme_light() +
+  geom_smooth(method='lm') +
+  labs(title = ("Hourly patterns of average severity")) +
+  xlab("Hours") +
+  ylab("Average Severity")
+```
+
+```{r, results = "asis"}
+source("stargazer.r")
+fit <- lm(data = shift_2 %>% 
+            group_by(arrive_hours) %>% # get the average by hours
+            summarise(average_severity = mean(pred_lnlos, na.rm = T)), average_severity ~ arrive_hours )
+resizebox.stargazer(fit, type = "latex",
+                    title="The relationship between hours and patient severity.", dep.var.caption = "")
+```
+
+It seems patient severity is not predicted by hour of the day.
+
+## Part 3
+```{r}
+census <- tibble(phys_id = NA, shift_date = as.Date(NA), shift_start = times(NA), shift_end = times(NA),
+                 hour = NA, census = as.numeric(NA), census_lowerbound = as.numeric(NA), 
+                 census_upperbound = as.numeric(NA)) # empty census
+all_shifts <- shift_2 %>% 
+  group_by(phys_id, shift_date, shift_start, shift_end, shift_nextday) %>%
+  summarise(n()) # all distinct id and shifts 
+for(k in 1:nrow(all_shifts)){
+  temp <- shift_2 %>% # temp, filtered data for each id and shift
+    filter(phys_id == all_shifts$phys_id[k] & shift_date == all_shifts$shift_date[k]) %>% 
+    mutate(patient_nextday = ifelse(leave_time < arrive_time, 1, 0)) %>%
+    arrange(arrive_time) # sort the arrive time.
+  if(temp$shift_nextday[1] != 1){ # same day shift
+    for(i in 1:(hours(temp$shift_end)[1] - hours(temp$shift_start)[1] + 4)){
+      count <- 0 
+      count_lower <- 0 
+      count_upper <- 0
+      for(j in 1:nrow(temp)){
+        if(hours(temp$arrive_time[j]) <  hours(temp$shift_start[1]) + i){ # arrived 
+          if(hours(temp$leave_time[j]) >=  hours(temp$shift_start[1]) + i - 1){ # not leaved yet
+            count <- count +1
+          } else if(temp$patient_nextday[j] == 1 & hours(temp$leave_time[j]) + 24 > hours(temp$shift_start[1]) + i - 1){  # consider patient arrived but spent another day
+            count <- count + 1
+          }
+        }
+      }
+      for(j in 1:nrow(temp)){
+        if(hours(temp$arrive_time[j]) <  hours(temp$shift_start[1]) + i){ # arrived 
+          if(hours(temp$leave_time[j]) >  hours(temp$shift_start[1]) + i - 1){ # not leaved yet
+            count_lower <- count_lower +1
+          } else if(temp$patient_nextday[j] == 1 & hours(temp$leave_time[j]) + 24 > hours(temp$shift_start[1]) + i - 1){  # consider patient arrived but spent another day
+            count_lower <- count_lower + 1
+          }
+        }
+      }
+      for(j in 1:nrow(temp)){
+        if(hours(temp$arrive_time[j]) <=  hours(temp$shift_start[1]) + i){ # arrived 
+          if(hours(temp$leave_time[j]) >=  hours(temp$shift_start[1]) + i - 1){ # not leaved yet
+            count_upper <- count_upper +1
+          } else if(temp$patient_nextday[j] == 1 & hours(temp$leave_time[j]) + 24 > hours(temp$shift_start[1]) + i - 1){  # consider patient arrived but spent another day
+            count_upper <- count_upper + 1
+          }
+        }
+      }
+      tibble <- tibble(phys_id = temp$phys_id[1], shift_date = temp$shift_date[1],
+                       shift_start = temp$shift_start[1], shift_end = temp$shift_end[1],
+                       hour = i, census = count, census_lowerbound = count_lower, 
+                       census_upperbound = count_upper)
+      census <- rbind(census, tibble)
+    }
+  } else { # the case two day shift 
+  # temp for this case
+    temp <- shift_2 %>% # temp, filtered data for each id and shift
+      filter(phys_id == all_shifts$phys_id[k] & shift_date == all_shifts$shift_date[k]) %>% 
+      mutate(patient_nextday = ifelse(leave_date !=  arrive_date, 1, 0)) %>%
+      mutate(hours_arrive = hours(arrive_time)) %>%
+      mutate(hours_arrive = ifelse(hours_arrive < 12, hours_arrive + 24, hours_arrive)) %>% # take care of the two day shift.
+      mutate(hours_leave = hours(leave_time)) %>%
+      mutate(hours_leave = ifelse(hours_leave < 12 | patient_nextday == 1, hours_leave + 24, hours_leave)) %>%
+      mutate(hours_shift_end = hours(shift_end)) %>%
+      mutate(hours_shift_end = ifelse(hours_shift_end < 12, hours_shift_end + 24, hours_shift_end)) %>%
+      arrange(arrive_time) # sort the arrive time.
+    for(i in 1:(hours(temp$shift_end)[1]+24 - hours(temp$shift_start)[1] + 4)){
+      count <- 0 
+      count_lower <- 0 
+      count_upper <- 0
+      for(j in 1:nrow(temp)){
+        if(temp$hours_arrive[j] <  hours(temp$shift_start[1]) + i){ # arrived 
+          if(temp$hours_leave[j] >=  hours(temp$shift_start[1]) + i - 1){ # not leaved yet
+            count <- count +1
+          }
+        }
+      }
+      for(j in 1:nrow(temp)){
+        if(temp$hours_arrive[j] <  hours(temp$shift_start[1]) + i){ # arrived 
+          if(temp$hours_leave[j] >  hours(temp$shift_start[1]) + i - 1){ # not leaved yet
+            count_lower <- count_lower +1
+          }
+        }
+      }
+      for(j in 1:nrow(temp)){
+        if(temp$hours_arrive[j] <=  hours(temp$shift_start[1]) + i){ # arrived 
+          if(temp$hours_leave[j] >=  hours(temp$shift_start[1]) + i - 1){ # not leaved yet
+            count_upper <- count_upper +1
+          }
+        }
+      }
+      tibble <- tibble(phys_id = temp$phys_id[1], shift_date = temp$shift_date[1],
+                       shift_start = temp$shift_start[1], shift_end = temp$shift_end[1],
+                       hour = i, census = count, census_lowerbound = count_lower, 
+                       census_upperbound = count_upper)
+      census <- rbind(census, tibble)
+    }
+  }
+}
+census <- census[-1,]
+```
+
+```{r}
+ggplot(data = census %>% group_by(shift_end) %>% 
+  summarise(n = mean(census)), aes(x = hours(shift_end), y = n))+
+  geom_line(color = "red") + 
+  scale_x_continuous(breaks = round(seq(0, 23, by = 1),1)) + # set x breaks
+  theme_light() +
+  geom_point()+
+  labs(title = ("Hourly patterns of census with time relative to end of shift")) +
+  xlab("Hours") +
+  ylab("Average Census")
+```
+
+_How does the census vary with time relative to end of shift?_
+
+Above graph shows that the average census for each shift end time. We can see that for the shift that ends at 10 a.m., the average census is 1.5, while for the shift that ends at 4 p.m., the average census on shift is about 5.5. These results were predictable because there were fewer patients at nignt and more during the day.
+
+_Discuss conceptually how you construct censuses and address issues with discrete time._
+
+First of all, I created empty tables and find all distinct ids and the shifts. In the first loop, I looped through all the distinct ids and shifts to subset the original data. Then, I separate the shifts into two cases: the same day shift and two day shift. 
+
+The same day shift is simple. I used big loop to loop throught the hours, then use the small loop to loop through the subseted data to compare hours, count, and enter it to the table. 
+
+The two day shift is bit complicated. Since the two day shifts always start after noon, I added 24 to the arrival time when necessary. For example, if the indicator that shows if the patient spent two days is true, I would add 24 hours to the hour of leave to compare with the hour of shift start + the nth hour of the shift. 
+
+When comparing hours, I used function `hours` to extract the hours of the arrival, leave, shift start and shift end. `hours` only cares about the hour term. If a patient leaves 1 minute after the first hour of the shift, I would still count it for the second hour of the shift. 
+
+_Upper bound Census and Lower bound Census are generated by slightly changing the criterion of comparing. Please see code. (I'm not sure what are they tho) _
+
+
+## Part 4 
+
+```{r}
+shift_4 <- shift_2 %>% 
+  mutate(patient_nextday = ifelse(leave_date != arrive_date, 1, 0)) %>%
+  mutate_at(c(7,9), as.numeric) %>% #convert to seconds. 
+  mutate(leave_time = ifelse(patient_nextday == 1, leave_time + 1, leave_time)) %>% #if  patient tow day, add one more day to leave_time
+  mutate(diff = (leave_time - arrive_time)*24*3600) # in seconds.
+
+df <- shift_4 %>%
+  group_by(phys_id) %>%
+  summarise(average_stay = mean(diff, na.rm = T))
+ggplot(data = df, aes(x = phys_id, y = average_stay))+
+  geom_line(color = "red") + 
+  scale_x_continuous(breaks = round(seq(1, 43, by = 1),1)) + # set x breaks
+  theme_light() +
+  geom_point()+
+  labs(title = ("Average seconds that physicians spend on discharging patients.")) +
+  xlab("Physicians") +
+  ylab("Seconds")
+```
+
+Physician 5 appears to be the fastest at discharging patients. Each patient on average, took him/her about 10223 seconds (170 minutes). But if we look at the data, the result doesn't look good.
+
+```{r}
+phys_5 <- shift_2 %>% 
+  filter(phys_id ==  5) 
+kable(phys_5, caption = "Record of Physician 5")%>% 
+  kable_styling(bootstrap_options = "striped",  font_size = 8, latex_options = "HOLD_position")%>% 
+    row_spec(0, bold = T)
+```
+
+we only have 2 observations for Physician 5. Let's look at the second lowest.
+
+```{r}
+phys_10 <- shift_2 %>% 
+  filter(phys_id ==  10)%>%
+  head(10)
+kable(phys_10, caption = "Record of Physician 10")%>% 
+  kable_styling(bootstrap_options = "striped",  font_size = 8, latex_options = "HOLD_position")%>% 
+    row_spec(0, bold = T)
+```
+
+Physician 10 looks better, it has 158 observations.  
+
+Now let's do the regression:
+
+```{r, results = "asis"}
+linear_1 <- lm(data = shift_4, log(diff) ~ phys_id)
+
+resizebox.stargazer(linear_1, type = "latex",
+                    title="The relationship between Physician and log stay time", dep.var.caption = "")
+```
+
+We can't get much useful information. The coefficients only indicate that the latter Physicians will have longer patient stays, which implies Physicians 1 is the fastest, and it is not true. 
+
+_What are potential threats to the validity of our assessment?_
+
+```{r}
+df2 <- shift_2 %>% 
+  filter(phys_id == 10 )%>%
+  group_by(shift_end) %>%
+  summarise(observations = n()) %>%
+  mutate(share = observations/sum(observations))
+kable(df2, caption = "Shifts of Physician 10")%>% 
+  kable_styling(bootstrap_options = "striped",  font_size = 8, latex_options = "HOLD_position")%>% 
+    row_spec(0, bold = T)
+```
+
+Let's define shifts that end at 4 am as empty shifts. If we look at the shifts of Physician 10, we can find that nearly 22.8$\%$ of the shifts are empty shifts, where the average is only about 12.1$\%$. Thus the distribution of shifts could be one of the major threats to our assessment, so is patient severity.
+
+```{r}
+df3 <- shift_2 %>% 
+  group_by(shift_end) %>%
+  summarise(observations = n()) %>%
+  mutate(share = observations/sum(observations))
+kable(df3, caption = "Shifts of all Physicians")%>% 
+  kable_styling(bootstrap_options = "striped",  font_size = 8, latex_options = "HOLD_position")%>% 
+    row_spec(0, bold = T)
+```
+
+
+Attempt: 
+
+Two new indicators are defined: `empty_shift` is true if the shift is an empty shift. `weekend` is true if the shift date is weekend. 
+
+```{r, results = "asis"}
+shift_5 <- shift_4 %>%
+  mutate(empty_shift = ifelse(shift_end == "04:00:00", 1 ,0)) %>% 
+  mutate(weekend = ifelse(weekdays(shift_date) %in% c("Saturday", "Sunday"), 1, 0))
+
+linear_2 <- rlm(data = shift_5, log(diff) ~ phys_id + pred_lnlos + empty_shift + weekend)
+
+resizebox.stargazer(linear_2, type = "latex",
+                    title="Physician effects to the log stay time", dep.var.caption = "")
+```
+
+
+
+
+
+
+
